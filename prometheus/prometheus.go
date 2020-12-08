@@ -57,7 +57,7 @@ func RegisterOn(registerer prometheusclient.Registerer) {
 			Name: "graphql_resolver_started_total",
 			Help: "Total number of resolver started on the graphql server.",
 		},
-		[]string{"object", "field"},
+		[]string{"operation", "object", "field"},
 	)
 
 	resolverCompletedCounter = prometheusclient.NewCounterVec(
@@ -65,20 +65,20 @@ func RegisterOn(registerer prometheusclient.Registerer) {
 			Name: "graphql_resolver_completed_total",
 			Help: "Total number of resolver completed on the graphql server.",
 		},
-		[]string{"object", "field"},
+		[]string{"operation", "object", "field"},
 	)
 
 	timeToResolveField = prometheusclient.NewHistogramVec(prometheusclient.HistogramOpts{
 		Name:    "graphql_resolver_duration_ms",
 		Help:    "The time taken to resolve a field by graphql server.",
 		Buckets: prometheusclient.ExponentialBuckets(1, 2, 11),
-	}, []string{"exitStatus", "object", "field"})
+	}, []string{"exitStatus", "operation", "object", "field"})
 
 	timeToHandleRequest = prometheusclient.NewHistogramVec(prometheusclient.HistogramOpts{
 		Name:    "graphql_request_duration_ms",
 		Help:    "The time taken to handle a request by graphql server.",
 		Buckets: prometheusclient.ExponentialBuckets(1, 2, 11),
-	}, []string{"exitStatus"})
+	}, []string{"exitStatus", "operation"})
 
 	registerer.MustRegister(
 		requestStartedCounter,
@@ -129,7 +129,7 @@ func (a Tracer) InterceptResponse(ctx context.Context, next graphql.ResponseHand
 	oc := graphql.GetOperationContext(ctx)
 	observerStart := oc.Stats.OperationStart
 
-	timeToHandleRequest.With(prometheusclient.Labels{"exitStatus": exitStatus}).
+	timeToHandleRequest.WithLabelValues(exitStatus, operationName(ctx)).
 		Observe(float64(time.Since(observerStart).Nanoseconds() / int64(time.Millisecond)))
 
 	requestCompletedCounter.Inc()
@@ -140,7 +140,7 @@ func (a Tracer) InterceptResponse(ctx context.Context, next graphql.ResponseHand
 func (a Tracer) InterceptField(ctx context.Context, next graphql.Resolver) (interface{}, error) {
 	fc := graphql.GetFieldContext(ctx)
 
-	resolverStartedCounter.WithLabelValues(fc.Object, fc.Field.Name).Inc()
+	resolverStartedCounter.WithLabelValues(operationName(ctx), fc.Object, fc.Field.Name).Inc()
 
 	observerStart := time.Now()
 
@@ -153,10 +153,23 @@ func (a Tracer) InterceptField(ctx context.Context, next graphql.Resolver) (inte
 		exitStatus = exitStatusSuccess
 	}
 
-	timeToResolveField.WithLabelValues(exitStatus, fc.Object, fc.Field.Name).
+	timeToResolveField.WithLabelValues(exitStatus, operationName(ctx), fc.Object, fc.Field.Name).
 		Observe(float64(time.Since(observerStart).Nanoseconds() / int64(time.Millisecond)))
 
-	resolverCompletedCounter.WithLabelValues(fc.Object, fc.Field.Name).Inc()
+	resolverCompletedCounter.WithLabelValues(operationName(ctx), fc.Object, fc.Field.Name).Inc()
 
 	return res, err
+}
+
+func operationName(ctx context.Context) string {
+	requestContext := graphql.GetRequestContext(ctx)
+	requestName := "nameless-operation"
+	if requestContext.Doc != nil && len(requestContext.Doc.Operations) != 0 {
+		op := requestContext.Doc.Operations[0]
+		if op.Name != "" {
+			requestName = op.Name
+		}
+	}
+
+	return requestName
 }
